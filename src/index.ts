@@ -14,23 +14,6 @@ const server = new McpServer({
 });
 
 server.registerTool(
-    'add',
-    {
-        title: 'Addition Tool',
-        description: 'Add two numbers',
-        inputSchema: { a: z.number(), b: z.number() },
-        outputSchema: { result: z.number() }
-    },
-    async ({ a, b }) => {
-        const output = { result: a + b };
-        return {
-            content: [{ type: 'text', text: JSON.stringify(output) }],
-            structuredContent: output
-        };
-    }
-);
-
-server.registerTool(
     'get_workflow_config',
     {
         title: 'Get Workflow Config',
@@ -501,21 +484,242 @@ server.registerTool(
     }
 );
 
-server.registerResource(
-    'greeting',
-    new ResourceTemplate('greeting://{name}', { list: undefined }),
+server.registerTool(
+    'add_code_eval_after_block',
     {
-        title: 'Greeting Resource',
-        description: 'Dynamic greeting generator'
+        title: 'Add Code Eval After Block',
+        description: 'Insert a code-evaluation step after a specific existing block in a Trellis workflow, and optionally persist the returned value into a field on a target entity',
+        inputSchema: {
+            after_block_id: z.string().describe('Existing block ID where the new code-eval block should attach'),
+            entity_name: z.string().describe('Human entity name for update_record (e.g. "Referral")'),
+            target_field_name: z.string().describe('Human field name on that entity'),
+            code: z.string().describe('JavaScript code that returns the final value (IIFE recommended)')
+        }
     },
-    async (uri, { name }) => ({
-        contents: [
-            {
-                uri: uri.href,
-                text: `Hello, ${name}!`
+    async ({ after_block_id, entity_name, target_field_name, code }) => {
+        const apiKey = process.env.TRELLIS_API_KEY;
+        const apiBase = process.env.TRELLIS_API_BASE;
+        const projectId = process.env.PROJECT_ID;
+        const workflowId = process.env.WORKFLOW_ID;
+        const apiVersion = '2025-03';
+
+        // Validate required env vars
+        if (!apiKey) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_KEY not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!apiBase) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_BASE not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!projectId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: PROJECT_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!workflowId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: WORKFLOW_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        try {
+            const timeout = parseInt(process.env.REQUEST_TIMEOUT || '30') * 1000;
+            const headers = {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+                'API-Version': apiVersion,
+                'Authorization': apiKey
+            };
+
+            // Step 2: Resolve entity by name
+            const entitiesParams = new URLSearchParams();
+            entitiesParams.append('project_id', projectId);
+
+            const entitiesResponse = await axios.get(
+                `${apiBase}/entities?${entitiesParams.toString()}`,
+                { headers, timeout }
+            );
+
+            const entities = entitiesResponse.data.entities || entitiesResponse.data;
+            const matchingEntities = entities.filter((e: any) =>
+                e.name.toLowerCase() === entity_name.toLowerCase()
+            );
+
+            if (matchingEntities.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No entity found with name "${entity_name}"`
+                    }],
+                    isError: true
+                };
             }
-        ]
-    })
+
+            if (matchingEntities.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple entities found with name "${entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const entity_id = matchingEntities[0].id;
+
+            // Step 3: Resolve field by name
+            const fieldsResponse = await axios.get(
+                `${apiBase}/entities/${entity_id}/fields`,
+                { headers, timeout }
+            );
+
+            const fields = fieldsResponse.data.fields || fieldsResponse.data;
+            const matchingFields = fields.filter((f: any) =>
+                f.name.toLowerCase() === target_field_name.toLowerCase()
+            );
+
+            if (matchingFields.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No field found with name "${target_field_name}" on entity "${entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingFields.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple fields found with name "${target_field_name}" on entity "${entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const entity_field_id = matchingFields[0].id;
+
+            // Step 4: Fetch existing workflow config
+            const workflowResponse = await axios.get(
+                `${apiBase}/workflows/${workflowId}/config`,
+                { headers, timeout }
+            );
+
+            const existingBlocks = workflowResponse.data.blocks || [];
+            const existingEdges = workflowResponse.data.edges || [];
+
+            // Ensure after_block_id exists
+            const afterBlockExists = existingBlocks.some((b: any) => b.id === after_block_id);
+            if (!afterBlockExists) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Block with ID "${after_block_id}" not found in workflow`
+                    }],
+                    isError: true
+                };
+            }
+
+            // Step 5: Create new code-eval block
+            const codeEvalBlockId = `code_eval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const codeEvalBlock = {
+                id: codeEvalBlockId,
+                block_type: "action",
+                type: "eval_code",
+                name: "Code Eval",
+                code_eval_config: {
+                    code: code
+                }
+            };
+
+            // Step 6: Create update_record block
+            const updateRecordBlockId = `update_record_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const updateRecordBlock = {
+                id: updateRecordBlockId,
+                block_type: "action",
+                type: "update_record",
+                name: "Update Record",
+                entity_id: entity_id,
+                record_reference_config: {
+                    record_reference: "{{event.row_id}}"
+                },
+                mapping_config: {
+                    mapping: {
+                        [entity_field_id]: `{{${codeEvalBlockId}}}`
+                    }
+                }
+            };
+
+            // Step 7: Create edges
+            const edgeA = {
+                id: `edge_${after_block_id}_${codeEvalBlockId}`,
+                source: after_block_id,
+                target: codeEvalBlockId,
+                animated: true
+            };
+
+            const edgeB = {
+                id: `edge_${codeEvalBlockId}_${updateRecordBlockId}`,
+                source: codeEvalBlockId,
+                target: updateRecordBlockId,
+                animated: true
+            };
+
+            // Step 8: PATCH workflow
+            const requestBody = {
+                blocks: [...existingBlocks, codeEvalBlock, updateRecordBlock],
+                edges: [...existingEdges, edgeA, edgeB],
+                deleted_block_ids: []
+            };
+
+            const response = await axios.patch(
+                `${apiBase}/workflows/${workflowId}/blocks`,
+                requestBody,
+                { headers, timeout }
+            );
+
+            // Step 9: Return
+            return {
+                content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }],
+                structuredContent: response.data
+            };
+        } catch (error: any) {
+            const errorMessage = error.response?.data
+                ? JSON.stringify(error.response.data, null, 2)
+                : error.message;
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error adding code eval after block: ${errorMessage}`
+                }],
+                isError: true
+            };
+        }
+    }
 );
 
 const app = express();
