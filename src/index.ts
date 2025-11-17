@@ -503,7 +503,6 @@ server.registerTool(
         const workflowId = process.env.WORKFLOW_ID;
         const apiVersion = '2025-03';
 
-        // Validate required env vars
         if (!apiKey) {
             return {
                 content: [{
@@ -553,7 +552,6 @@ server.registerTool(
                 'Authorization': apiKey
             };
 
-            // Step 2: Resolve entity by name
             const entitiesParams = new URLSearchParams();
             entitiesParams.append('project_id', projectId);
 
@@ -562,7 +560,22 @@ server.registerTool(
                 { headers, timeout }
             );
 
-            const entities = entitiesResponse.data.entities || entitiesResponse.data;
+const rawEntities = entitiesResponse.data;
+const entities = Array.isArray(rawEntities)
+  ? rawEntities
+  : Array.isArray((rawEntities as any).entities)
+    ? (rawEntities as any).entities
+    : [];
+
+if (!Array.isArray(entities)) {
+  return {
+    content: [{
+      type: 'text',
+      text: `Error: Unexpected entities response shape: ${JSON.stringify(rawEntities).slice(0, 500)}`
+    }],
+    isError: true
+  };
+}
             const matchingEntities = entities.filter((e: any) =>
                 e.name.toLowerCase() === entity_name.toLowerCase()
             );
@@ -589,14 +602,18 @@ server.registerTool(
 
             const entity_id = matchingEntities[0].id;
 
-            // Step 3: Resolve field by name
             const fieldsResponse = await axios.get(
                 `${apiBase}/entities/${entity_id}/fields`,
                 { headers, timeout }
             );
 
-            const fields = fieldsResponse.data.fields || fieldsResponse.data;
-            const matchingFields = fields.filter((f: any) =>
+const rawFields = fieldsResponse.data;
+const fields = Array.isArray(rawFields)
+  ? rawFields
+  : Array.isArray((rawFields as any).fields)
+    ? (rawFields as any).fields
+    : [];
+                const matchingFields = fields.filter((f: any) =>
                 f.name.toLowerCase() === target_field_name.toLowerCase()
             );
 
@@ -622,16 +639,16 @@ server.registerTool(
 
             const entity_field_id = matchingFields[0].id;
 
-            // Step 4: Fetch existing workflow config
             const workflowResponse = await axios.get(
                 `${apiBase}/workflows/${workflowId}/config`,
                 { headers, timeout }
             );
 
-            const existingBlocks = workflowResponse.data.blocks || [];
-            const existingEdges = workflowResponse.data.edges || [];
+            const existingBlocks = workflowResponse.data.blocks 
+  || workflowResponse.data.nodes 
+  || [];
+const existingEdges = workflowResponse.data.edges || [];
 
-            // Ensure after_block_id exists
             const afterBlockExists = existingBlocks.some((b: any) => b.id === after_block_id);
             if (!afterBlockExists) {
                 return {
@@ -643,7 +660,6 @@ server.registerTool(
                 };
             }
 
-            // Step 5: Create new code-eval block
             const codeEvalBlockId = `code_eval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             const codeEvalBlock = {
                 id: codeEvalBlockId,
@@ -655,7 +671,6 @@ server.registerTool(
                 }
             };
 
-            // Step 6: Create update_record block
             const updateRecordBlockId = `update_record_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             const updateRecordBlock = {
                 id: updateRecordBlockId,
@@ -673,7 +688,6 @@ server.registerTool(
                 }
             };
 
-            // Step 7: Create edges
             const edgeA = {
                 id: `edge_${after_block_id}_${codeEvalBlockId}`,
                 source: after_block_id,
@@ -688,7 +702,6 @@ server.registerTool(
                 animated: true
             };
 
-            // Step 8: PATCH workflow
             const requestBody = {
                 blocks: [...existingBlocks, codeEvalBlock, updateRecordBlock],
                 edges: [...existingEdges, edgeA, edgeB],
@@ -701,7 +714,6 @@ server.registerTool(
                 { headers, timeout }
             );
 
-            // Step 9: Return
             return {
                 content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }],
                 structuredContent: response.data
