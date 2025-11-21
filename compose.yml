@@ -1,0 +1,24 @@
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-ts-server
+    ports:
+      - "3000:3000"
+    environment:
+      - TRELLIS_API_KEY=${TRELLIS_API_KEY}
+      - TRELLIS_API_BASE=${TRELLIS_API_BASE:-https://enterprise.training.api.runtrellis.com/v1}
+      - PROJECT_ID=${PROJECT_ID}
+      - WORKFLOW_ID=${WORKFLOW_ID}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+      - PORT=3000
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
