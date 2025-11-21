@@ -32,7 +32,7 @@ export function registerAddCodeEvalAfterBlock(server: McpServer) {
                     config.timeout
                 );
 
-                const rawEntities = entitiesResponse.data;
+                const rawEntities = entitiesResponse.data.data || entitiesResponse.data;
                 const entities = parseEntitiesResponse(rawEntities);
                 const entity = resolveEntityByName(entities, entity_name);
                 const entity_id = entity.id;
