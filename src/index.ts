@@ -1767,6 +1767,713 @@ server.registerTool(
 );
 
 server.registerTool(
+    'sync_child_field_to_parent',
+    {
+        title: 'Sync Child Field To Parent',
+        description: 'Fetch first child entity record, extract a field, and update the parent row with that field\'s value',
+        inputSchema: {
+            source_block_id: z.string().describe('ID of an existing block in the workflow to connect from'),
+            parent_entity_name: z.string().describe('Human-facing name of the parent entity (e.g. "Referral")'),
+            child_entity_name: z.string().describe('Human-facing name of the child entity (e.g. "Asset")'),
+            child_field_name: z.string().describe('Field name on the child entity to extract'),
+            parent_field_name: z.string().describe('Field name on the parent entity to update'),
+            position_x: z.number().optional().describe('X coordinate for the flow (fallback: use source block position_x)'),
+            position_y: z.number().optional().describe('Y coordinate for the flow (fallback: use source block position_y + 150)')
+        }
+    },
+    async ({ source_block_id, parent_entity_name, child_entity_name, child_field_name, parent_field_name, position_x, position_y }) => {
+        const apiKey = process.env.TRELLIS_API_KEY;
+        const apiBase = process.env.TRELLIS_API_BASE;
+        const projectId = process.env.PROJECT_ID;
+        const workflowId = process.env.WORKFLOW_ID;
+        const apiVersion = '2025-03';
+
+        // Validate required env vars
+        if (!apiKey) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_KEY not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!apiBase) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_BASE not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!projectId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: PROJECT_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!workflowId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: WORKFLOW_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        try {
+            const timeout = parseInt(process.env.REQUEST_TIMEOUT || '30') * 1000;
+            const headers = {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+                'API-Version': apiVersion,
+                'Authorization': apiKey
+            };
+
+            // Step 1: Resolve parent_entity_name → parent_entity_id
+            const entitiesParams = new URLSearchParams();
+            entitiesParams.append('project_id', projectId);
+
+            const entitiesResponse = await axios.get(
+                `${apiBase}/entities?${entitiesParams.toString()}`,
+                { headers, timeout }
+            );
+
+            const rawEntities = entitiesResponse.data.data;
+            const entities = Array.isArray(rawEntities)
+                ? rawEntities
+                : Array.isArray((rawEntities as any).entities)
+                    ? (rawEntities as any).entities
+                    : [];
+
+            if (!Array.isArray(entities)) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Unexpected entities response shape: ${JSON.stringify(rawEntities).slice(0, 500)}`
+                    }],
+                    isError: true
+                };
+            }
+
+            const matchingParentEntities = entities.filter((e: any) =>
+                e.name.toLowerCase() === parent_entity_name.toLowerCase()
+            );
+
+            if (matchingParentEntities.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No parent entity found with name "${parent_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingParentEntities.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple parent entities found with name "${parent_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const parent_entity_id = matchingParentEntities[0].id;
+
+            // Step 2: Resolve child_entity_name → child_entity_id
+            const matchingChildEntities = entities.filter((e: any) =>
+                e.name.toLowerCase() === child_entity_name.toLowerCase()
+            );
+
+            if (matchingChildEntities.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No child entity found with name "${child_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingChildEntities.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple child entities found with name "${child_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const child_entity_id = matchingChildEntities[0].id;
+
+            // Step 3: Resolve child_field_name → child_entity_field_id
+            const childFieldsResponse = await axios.get(
+                `${apiBase}/entities/${child_entity_id}/fields`,
+                { headers, timeout }
+            );
+
+            const rawChildFields = childFieldsResponse.data.data || childFieldsResponse.data;
+            const childFields = Array.isArray(rawChildFields)
+                ? rawChildFields
+                : Array.isArray((rawChildFields as any).fields)
+                    ? (rawChildFields as any).fields
+                    : [];
+
+            if (!Array.isArray(childFields)) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Unexpected child fields response shape: ${JSON.stringify(rawChildFields).slice(0, 500)}`
+                    }],
+                    isError: true
+                };
+            }
+
+            const matchingChildFields = childFields.filter((f: any) =>
+                f.name.toLowerCase() === child_field_name.toLowerCase()
+            );
+
+            if (matchingChildFields.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No field found with name "${child_field_name}" on child entity "${child_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingChildFields.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple fields found with name "${child_field_name}" on child entity "${child_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const child_field_id = matchingChildFields[0].id;
+
+            // Step 4: Resolve parent_field_name → parent_entity_field_id
+            const parentFieldsResponse = await axios.get(
+                `${apiBase}/entities/${parent_entity_id}/fields`,
+                { headers, timeout }
+            );
+
+            const rawParentFields = parentFieldsResponse.data.data || parentFieldsResponse.data;
+            const parentFields = Array.isArray(rawParentFields)
+                ? rawParentFields
+                : Array.isArray((rawParentFields as any).fields)
+                    ? (rawParentFields as any).fields
+                    : [];
+
+            if (!Array.isArray(parentFields)) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Unexpected parent fields response shape: ${JSON.stringify(rawParentFields).slice(0, 500)}`
+                    }],
+                    isError: true
+                };
+            }
+
+            const matchingParentFields = parentFields.filter((f: any) =>
+                f.name.toLowerCase() === parent_field_name.toLowerCase()
+            );
+
+            if (matchingParentFields.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No field found with name "${parent_field_name}" on parent entity "${parent_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingParentFields.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple fields found with name "${parent_field_name}" on parent entity "${parent_entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const parent_field_id = matchingParentFields[0].id;
+
+            // Step 5: Load workflow, locate source_block_id, compute positions
+            const workflowResponse = await axios.get(
+                `${apiBase}/workflows/${workflowId}/config`,
+                { headers, timeout }
+            );
+
+            const nodes = workflowResponse.data.data?.nodes || workflowResponse.data.nodes || [];
+            const edgesFromConfig = workflowResponse.data.data?.edges || workflowResponse.data.edges || [];
+
+            const sourceBlock = nodes.find((b: any) => b.id === source_block_id);
+
+            if (!sourceBlock) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Block with ID "${source_block_id}" not found in workflow`
+                    }],
+                    isError: true
+                };
+            }
+
+            const baseX = typeof sourceBlock.position_x === 'number' ? sourceBlock.position_x : 0;
+            const baseY = typeof sourceBlock.position_y === 'number' ? sourceBlock.position_y : 0;
+
+            const x0 = position_x ?? baseX;
+            const y0 = position_y ?? (baseY + 150);
+
+            // Step 6: Create code_eval block
+            const codeEvalBlockId = `code_eval_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const codeEvalConfigId = `code_eval_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const codeEvalBlock = {
+                id: codeEvalBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'Extract Child Field',
+                position: {
+                    x: x0,
+                    y: y0
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'eval_code' as const,
+                    code_eval_config: {
+                        id: codeEvalConfigId,
+                        code: `
+(() => {
+  const list = event.children["${child_entity_id}"] || [];
+  const first = list[0] || null;
+  return first ? first["${child_field_id}"] : null;
+})()
+                        `.trim()
+                    }
+                }
+            };
+
+            // Step 7: Create update_record block
+            const updateRecordBlockId = `update_record_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const recordConfigId = `rec_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const mappingConfigId = `map_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const updateRecordBlock = {
+                id: updateRecordBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'Update Parent From Child',
+                position: {
+                    x: x0,
+                    y: y0 + 150
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'update_record' as const,
+                    entity_id: parent_entity_id,
+                    record_reference_config: {
+                        id: recordConfigId,
+                        record_reference: '{{event.row_id}}',
+                        filters: {}
+                    },
+                    mapping_config: {
+                        id: mappingConfigId,
+                        mapping: {
+                            [parent_field_id]: `{{${codeEvalBlockId}}}`
+                        },
+                        mapping_reference: undefined
+                    },
+                    reference_type: 'record_reference' as const
+                }
+            };
+
+            // Step 8: Build edges
+            const newEdges = [
+                ...(Array.isArray(edgesFromConfig)
+                    ? edgesFromConfig.map((e: any) => ({
+                        source: e.source,
+                        target: e.target
+                    }))
+                    : []),
+                { source: source_block_id, target: codeEvalBlockId },
+                { source: codeEvalBlockId, target: updateRecordBlockId }
+            ];
+
+            // Step 9: PATCH workflow
+            const requestBody = {
+                blocks: [codeEvalBlock, updateRecordBlock],
+                deleted_block_ids: [],
+                edges: newEdges
+            };
+
+            const response = await axios.patch(
+                `${apiBase}/workflows/${workflowId}/blocks`,
+                requestBody,
+                { headers, timeout }
+            );
+
+            // Step 10: Extract server-generated IDs
+            const idMapping = response.data.data?.id_mapping || response.data.id_mapping || {};
+
+            const result = {
+                code_eval_block_id: idMapping[codeEvalBlockId] || codeEvalBlockId,
+                update_record_block_id: idMapping[updateRecordBlockId] || updateRecordBlockId,
+                temp_ids: {
+                    codeEvalBlockId,
+                    updateRecordBlockId
+                },
+                id_mapping: idMapping
+            };
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(result, null, 2)
+                }],
+                structuredContent: result
+            };
+        } catch (error: any) {
+            const errorMessage = error.response?.data
+                ? JSON.stringify(error.response.data, null, 2)
+                : error.message;
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error syncing child field to parent: ${errorMessage}`
+                }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.registerTool(
+    'rename_assets_for_row',
+    {
+        title: 'Rename Assets For Row',
+        description: 'Fetch all assets for the row ({{event.row_id}}), loop over them, and rename them using a template string',
+        inputSchema: {
+            source_block_id: z.string().describe('ID of an existing block in the workflow to connect from'),
+            entity_name: z.string().describe('Human-facing entity name (e.g. "Referral")'),
+            name_template: z.string().describe('Template string for new asset name (e.g. "{{loop.item.name}}_processed")'),
+            position_x: z.number().optional().describe('X coordinate for the flow (fallback: use source block position_x)'),
+            position_y: z.number().optional().describe('Y coordinate for the flow (fallback: use source block position_y + 150)')
+        }
+    },
+    async ({ source_block_id, entity_name, name_template, position_x, position_y }) => {
+        const apiKey = process.env.TRELLIS_API_KEY;
+        const apiBase = process.env.TRELLIS_API_BASE;
+        const projectId = process.env.PROJECT_ID;
+        const workflowId = process.env.WORKFLOW_ID;
+        const apiVersion = '2025-03';
+
+        // Validate required env vars
+        if (!apiKey) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_KEY not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!apiBase) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: TRELLIS_API_BASE not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!projectId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: PROJECT_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        if (!workflowId) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: WORKFLOW_ID not found in environment variables'
+                }],
+                isError: true
+            };
+        }
+
+        try {
+            const timeout = parseInt(process.env.REQUEST_TIMEOUT || '30') * 1000;
+            const headers = {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+                'API-Version': apiVersion,
+                'Authorization': apiKey
+            };
+
+            // Step 1: Resolve entity_name → entity_id
+            const entitiesParams = new URLSearchParams();
+            entitiesParams.append('project_id', projectId);
+
+            const entitiesResponse = await axios.get(
+                `${apiBase}/entities?${entitiesParams.toString()}`,
+                { headers, timeout }
+            );
+
+            const rawEntities = entitiesResponse.data.data;
+            const entities = Array.isArray(rawEntities)
+                ? rawEntities
+                : Array.isArray((rawEntities as any).entities)
+                    ? (rawEntities as any).entities
+                    : [];
+
+            if (!Array.isArray(entities)) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Unexpected entities response shape: ${JSON.stringify(rawEntities).slice(0, 500)}`
+                    }],
+                    isError: true
+                };
+            }
+
+            const matchingEntities = entities.filter((e: any) =>
+                e.name.toLowerCase() === entity_name.toLowerCase()
+            );
+
+            if (matchingEntities.length === 0) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: No entity found with name "${entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            if (matchingEntities.length > 1) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Multiple entities found with name "${entity_name}"`
+                    }],
+                    isError: true
+                };
+            }
+
+            const entity_id = matchingEntities[0].id;
+
+            // Step 2: Load workflow, find source_block_id, compute positions
+            const workflowResponse = await axios.get(
+                `${apiBase}/workflows/${workflowId}/config`,
+                { headers, timeout }
+            );
+
+            const nodes = workflowResponse.data.data?.nodes || workflowResponse.data.nodes || [];
+            const edgesFromConfig = workflowResponse.data.data?.edges || workflowResponse.data.edges || [];
+
+            const sourceBlock = nodes.find((b: any) => b.id === source_block_id);
+
+            if (!sourceBlock) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `Error: Block with ID "${source_block_id}" not found in workflow`
+                    }],
+                    isError: true
+                };
+            }
+
+            const baseX = typeof sourceBlock.position_x === 'number' ? sourceBlock.position_x : 0;
+            const baseY = typeof sourceBlock.position_y === 'number' ? sourceBlock.position_y : 0;
+
+            const x0 = position_x ?? baseX;
+            const y0 = position_y ?? (baseY + 150);
+
+            // Step 3: Create get_record_assets block
+            const getAssetsBlockId = `wblock_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const recordConfigId = `rec_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const getAssetsBlock = {
+                id: getAssetsBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'Get Record Assets',
+                position: {
+                    x: x0,
+                    y: y0
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'get_record_assets' as const,
+                    entity_id: entity_id,
+                    record_reference_config: {
+                        id: recordConfigId,
+                        record_reference: '{{event.row_id}}',
+                        filters: {}
+                    },
+                    reference_type: 'record_reference' as const
+                }
+            };
+
+            // Step 4: Create Start Loop and End Loop blocks
+            const startLoopBlockId = `wblock_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const loopConfigId = `loop_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const startLoopBlock = {
+                id: startLoopBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'Start Loop',
+                position: {
+                    x: x0,
+                    y: y0 + 150
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'start_loop' as const,
+                    loop_config: {
+                        id: loopConfigId,
+                        loop_type: 'concurrent',
+                        loop_variable: 'list',
+                        table_reference: null,
+                        list_reference: `{{${getAssetsBlockId}.asset_ids}}`
+                    }
+                }
+            };
+
+            const endLoopBlockId = `wblock_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const endLoopBlock = {
+                id: endLoopBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'End Loop',
+                position: {
+                    x: x0,
+                    y: y0 + 300
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'end_loop' as const
+                }
+            };
+
+            // Step 5: Create update_asset block
+            const updateAssetBlockId = `wblock_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            const updateAssetConfigId = `upd_asset_cfg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+            const updateAssetBlock = {
+                id: updateAssetBlockId,
+                workflow_id: workflowId,
+                type: 'action' as const,
+                name: 'Rename Asset',
+                position: {
+                    x: x0,
+                    y: y0 + 225
+                },
+                event_filter_metadata: {},
+                action: {
+                    name: 'update_asset' as const,
+                    update_asset_config: {
+                        id: updateAssetConfigId,
+                        asset_id: '{{loop.item}}',
+                        new_name: name_template
+                    }
+                }
+            };
+
+            // Step 6: Build new edges
+            const newEdges = [
+                ...(Array.isArray(edgesFromConfig)
+                    ? edgesFromConfig.map((e: any) => ({
+                        source: e.source,
+                        target: e.target
+                    }))
+                    : []),
+                { source: source_block_id, target: getAssetsBlockId },
+                { source: getAssetsBlockId, target: startLoopBlockId },
+                { source: startLoopBlockId, target: updateAssetBlockId },
+                { source: updateAssetBlockId, target: endLoopBlockId }
+            ];
+
+            // Step 7: PATCH workflow
+            const requestBody = {
+                blocks: [getAssetsBlock, startLoopBlock, endLoopBlock, updateAssetBlock],
+                deleted_block_ids: [],
+                edges: newEdges
+            };
+
+            const response = await axios.patch(
+                `${apiBase}/workflows/${workflowId}/blocks`,
+                requestBody,
+                { headers, timeout }
+            );
+
+            // Step 8: Extract server-generated IDs
+            const idMapping = response.data.data?.id_mapping || response.data.id_mapping || {};
+
+            const result = {
+                get_assets_block_id: idMapping[getAssetsBlockId] || getAssetsBlockId,
+                start_loop_block_id: idMapping[startLoopBlockId] || startLoopBlockId,
+                update_asset_block_id: idMapping[updateAssetBlockId] || updateAssetBlockId,
+                end_loop_block_id: idMapping[endLoopBlockId] || endLoopBlockId,
+                temp_get_assets_block_id: getAssetsBlockId,
+                temp_start_loop_block_id: startLoopBlockId,
+                temp_update_asset_block_id: updateAssetBlockId,
+                temp_end_loop_block_id: endLoopBlockId,
+                id_mapping: idMapping
+            };
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(result, null, 2)
+                }],
+                structuredContent: result
+            };
+        } catch (error: any) {
+            const errorMessage = error.response?.data
+                ? JSON.stringify(error.response.data, null, 2)
+                : error.message;
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error creating rename assets flow: ${errorMessage}`
+                }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.registerTool(
     'create_child_transform_flow',
     {
         title: 'Create Child Transform Flow',
